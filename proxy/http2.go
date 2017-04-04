@@ -78,16 +78,6 @@ func (h *http2) Dial(network, addr string) (net.Conn, error) {
 	if v, ok := h.cache.GetNotStale(h.addr); ok {
 		config = v.(*tls.Config)
 	} else {
-		/*
-			config = &tls.Config{
-				MinVersion:         tls.VersionTLS10,
-				MaxVersion:         tls.VersionTLS13,
-				Max0RTTDataSize:    100 * 1024,
-				InsecureSkipVerify: true,
-				ServerName:         h.hostname,
-				ClientSessionCache: tls.NewLRUClientSessionCache(1024),
-			}
-		*/
 		config = &tls.Config{
 			MinVersion:         tls.VersionTLS10,
 			MaxVersion:         tls.VersionTLS12,

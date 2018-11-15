@@ -97,6 +97,10 @@ func FromURL(u *url.URL, forward Dialer, resolver Resolver) (Dialer, error) {
 		return HTTP2("tcp", u.Host, auth, forward, resolver)
 	case "ssh", "ssh2":
 		return SSH2("tcp", u.Host, auth, forward, resolver)
+	case "http+post":
+		return httpTunnel("tcp", "http", u.Host, auth, forward, resolver)
+	case "https+post":
+		return httpTunnel("tcp", "https", u.Host, auth, forward, resolver)
 	}
 
 	// If the scheme doesn't match any of the built-in schemes, see if it

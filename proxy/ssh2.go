@@ -8,8 +8,9 @@ import (
 	"errors"
 	"net"
 	"os"
-	"strconv"
+	"time"
 
+	"go.uber.org/atomic"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -25,6 +26,8 @@ func SSH2(network, addr string, auth *Auth, forward Dialer, resolver Resolver, o
 		user:     auth.User,
 		password: auth.Password,
 	}
+
+	s.sshDialer = atomic.NewPointer[sshDialer](nil)
 
 	for _, opt := range opts {
 		err := opt(s)
@@ -81,26 +84,34 @@ type ssh2 struct {
 	network, addr string
 	forward       Dialer
 	resolver      Resolver
+	sshDialer     *atomic.Pointer[sshDialer]
 }
 
-type sshConn struct {
-	net.Conn
-	sshClient *ssh.Client
+type sshDialer struct {
+	alive  *atomic.Bool
+	client *ssh.Client
 }
 
-func (c *sshConn) Close() error {
-	defer c.sshClient.Close()
-	return c.Conn.Close()
-}
-
-// Dial connects to the address addr on the network net via the HTTP1 proxy.
-func (s *ssh2) Dial(network, addr string) (net.Conn, error) {
-	switch network {
-	case "tcp", "tcp6", "tcp4":
-	default:
-		return nil, errors.New("proxy: no support for HTTP proxy connections of type " + network)
+func (s *sshDialer) keepAlive(done <-chan struct{}) error {
+	const keepAliveInterval = time.Minute
+	t := time.NewTicker(keepAliveInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-t.C:
+			_, _, err := s.client.SendRequest(
+				"keepalive@golang.org", true, nil)
+			if err != nil {
+				s.alive.Store(false)
+				return err
+			}
+		case <-done:
+			return nil
+		}
 	}
+}
 
+func (s *ssh2) newDialer() (*sshDialer, error) {
 	config := &ssh.ClientConfig{
 		User: s.user,
 		Auth: []ssh.AuthMethod{
@@ -113,48 +124,39 @@ func (s *ssh2) Dial(network, addr string) (net.Conn, error) {
 		config.HostKeyCallback = s.hostKeyCallback
 	}
 
-	conn, err := ssh.Dial(s.network, s.addr, config)
+	sshClient, err := ssh.Dial(s.network, s.addr, config)
 	if err != nil {
 		return nil, err
 	}
-	closeConn := &conn
-	defer func() {
-		if closeConn != nil {
-			(*closeConn).Close()
+
+	dialer := &sshDialer{
+		alive:  atomic.NewBool(true),
+		client: sshClient,
+	}
+
+	// TODO
+	done := make(chan struct{})
+	go dialer.keepAlive(done)
+	return dialer, nil
+}
+
+// Dial connects to the address addr on the network net via the HTTP1 proxy.
+func (s *ssh2) Dial(network, addr string) (net.Conn, error) {
+	switch network {
+	case "tcp", "tcp6", "tcp4":
+	default:
+		return nil, errors.New("proxy: no support for HTTP proxy connections of type " + network)
+	}
+
+	// dialer is nil or is not alive
+	if s.sshDialer.Load() == nil || !s.sshDialer.Load().alive.Load() {
+		d, err := s.newDialer()
+		if err != nil {
+			return nil, err
 		}
-	}()
-
-	host, portStr, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, err
+		s.sshDialer.Store(d)
 	}
 
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return nil, errors.New("proxy: failed to parse port number: " + portStr)
-	}
-	if port < 1 || port > 0xffff {
-		return nil, errors.New("proxy: port number out of range: " + portStr)
-	}
-
-	if s.resolver != nil {
-		hosts, err := s.resolver.LookupHost(host)
-		if err == nil && len(hosts) > 0 {
-			host = hosts[0]
-		}
-	}
-
-	ips, err := net.LookupIP(host)
-	if err != nil {
-		return nil, err
-	}
-
-	raddr := &net.TCPAddr{IP: ips[0], Port: port}
-	conn1, err := conn.DialTCP(network, nil, raddr)
-	if err != nil {
-		return nil, err
-	}
-
-	closeConn = nil
-	return &sshConn{conn1, conn}, nil
+	dialer := s.sshDialer.Load().client
+	return dialer.Dial(network, addr)
 }

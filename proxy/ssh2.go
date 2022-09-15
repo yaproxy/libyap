@@ -7,12 +7,16 @@ package proxy
 import (
 	"errors"
 	"net"
+	"os"
 	"strconv"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 )
 
-func SSH2(network, addr string, auth *Auth, forward Dialer, resolver Resolver) (Dialer, error) {
+type SSH2Option func(*ssh2) error
+
+func SSH2(network, addr string, auth *Auth, forward Dialer, resolver Resolver, opts ...SSH2Option) (Dialer, error) {
 	s := &ssh2{
 		network:  network,
 		addr:     addr,
@@ -22,14 +26,61 @@ func SSH2(network, addr string, auth *Auth, forward Dialer, resolver Resolver) (
 		password: auth.Password,
 	}
 
+	for _, opt := range opts {
+		err := opt(s)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return s, nil
 }
 
+func SSH2WithPublicKeys(keys ...string) SSH2Option {
+	return func(s *ssh2) error {
+		var signers []ssh.Signer
+		for _, p := range keys {
+			data, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			signer, err := ssh.ParsePrivateKey(data)
+			if err != nil {
+				return err
+			}
+			signers = append(signers, signer)
+		}
+		s.signers = signers
+		return nil
+	}
+}
+
+func SSH2WithKnownHosts(hostFiles ...string) SSH2Option {
+	return func(s *ssh2) error {
+		hostKeyCallback, err := knownhosts.New(hostFiles...)
+		if err != nil {
+			return err
+		}
+		s.hostKeyCallback = hostKeyCallback
+		return nil
+	}
+}
+
+func SSH2WithSkipKnownHosts() SSH2Option {
+	return func(s *ssh2) error {
+		s.hostKeyCallback = ssh.InsecureIgnoreHostKey()
+		return nil
+	}
+}
+
 type ssh2 struct {
-	user, password string
-	network, addr  string
-	forward        Dialer
-	resolver       Resolver
+	user, password  string
+	signers         []ssh.Signer
+	hostKeyCallback ssh.HostKeyCallback
+
+	network, addr string
+	forward       Dialer
+	resolver      Resolver
 }
 
 type sshConn struct {
@@ -55,6 +106,11 @@ func (s *ssh2) Dial(network, addr string) (net.Conn, error) {
 		Auth: []ssh.AuthMethod{
 			ssh.Password(s.password),
 		},
+	}
+
+	if len(s.signers) > 0 {
+		config.Auth = append(config.Auth, ssh.PublicKeys(s.signers...))
+		config.HostKeyCallback = s.hostKeyCallback
 	}
 
 	conn, err := ssh.Dial(s.network, s.addr, config)

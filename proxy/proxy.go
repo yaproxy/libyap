@@ -96,7 +96,21 @@ func FromURL(u *url.URL, forward Dialer, resolver Resolver) (Dialer, error) {
 	case "https+h2":
 		return HTTP2("tcp", u.Host, auth, forward, resolver)
 	case "ssh", "ssh2":
-		return SSH2("tcp", u.Host, auth, forward, resolver)
+		query := u.Query()
+		var opts []SSH2Option
+		if v, ok := query["keys"]; ok {
+			opts = append(opts, SSH2WithPublicKeys(v...))
+		}
+		if v, ok := query["key"]; ok {
+			opts = append(opts, SSH2WithPublicKeys(v...))
+		}
+		if _, ok := query["skip_known_hosts"]; ok {
+			opts = append(opts, SSH2WithSkipKnownHosts())
+		}
+		if v, ok := query["known_hosts"]; ok {
+			opts = append(opts, SSH2WithKnownHosts(v...))
+		}
+		return SSH2("tcp", u.Host, auth, forward, resolver, opts...)
 	case "http+post":
 		return httpTunnel("tcp", "http", u.Host, auth, forward, resolver)
 	case "https+post":
